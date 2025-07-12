@@ -10,7 +10,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License"
 ]
 dependencies = [
-    "click"
+    "click",
+    "tomli>=2; python_version < '3.11'"
 ]
 
 [project.optional-dependencies]

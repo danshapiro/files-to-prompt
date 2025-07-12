@@ -1,6 +1,7 @@
 import os
 import pytest
 import re
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
@@ -560,3 +561,211 @@ def test_copy_clipboard_basic(tmpdir):
             
             # The actual platform-specific handling is done by pyperclip
             # We just ensure our code calls it correctly
+
+
+def test_config_file_loading(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file1.py", "w") as f:
+            f.write("Python file")
+        with open("test_dir/file2.txt", "w") as f:
+            f.write("Text file")
+        with open("test_dir/ignored.pyc", "w") as f:
+            f.write("Compiled file")
+        
+        # Create a project config file
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+extensions = ["py"]
+ignore = ["*.pyc"]
+line_numbers = true
+""")
+        
+        # Test that config is loaded
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert "test_dir/file1.py" in result.output
+        assert "Python file" in result.output
+        assert "test_dir/file2.txt" not in result.output  # Only .py files
+        assert "test_dir/ignored.pyc" not in result.output  # Ignored
+        assert "1  Python file" in result.output  # Line numbers enabled
+        
+        # Test --no-config flag
+        result = runner.invoke(cli, ["test_dir", "--no-config"])
+        assert result.exit_code == 0
+        assert "test_dir/file1.py" in result.output
+        assert "test_dir/file2.txt" in result.output  # All files included
+        assert "test_dir/ignored.pyc" in result.output  # Not ignored
+        assert "1  Python file" not in result.output  # No line numbers
+
+
+def test_config_precedence(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file1.py", "w") as f:
+            f.write("Python file")
+        with open("test_dir/file2.txt", "w") as f:
+            f.write("Text file")
+        
+        # Create a project config file
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+extensions = ["py"]
+markdown = true
+""")
+        
+        # CLI args should override config
+        result = runner.invoke(cli, ["test_dir", "-e", "txt"])
+        assert result.exit_code == 0
+        assert "test_dir/file1.py" not in result.output
+        assert "test_dir/file2.txt" in result.output
+        assert "```" in result.output  # Markdown from config
+        
+        # CLI flag overrides config
+        result = runner.invoke(cli, ["test_dir", "--cxml"])
+        assert result.exit_code == 0
+        assert "<documents>" in result.output  # XML format overrides markdown
+
+
+def test_config_ignore_patterns_merge(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file1.py", "w") as f:
+            f.write("Python file")
+        with open("test_dir/test.pyc", "w") as f:
+            f.write("Compiled file")
+        with open("test_dir/cache.tmp", "w") as f:
+            f.write("Temp file")
+        
+        # Create a project config file
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+ignore = ["*.pyc"]
+""")
+        
+        # Config and CLI ignore patterns should merge
+        result = runner.invoke(cli, ["test_dir", "--ignore", "*.tmp"])
+        assert result.exit_code == 0
+        assert "test_dir/file1.py" in result.output
+        assert "test_dir/test.pyc" not in result.output  # From config
+        assert "test_dir/cache.tmp" not in result.output  # From CLI
+
+
+def test_config_in_parent_directory(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("nested/deep/test_dir")
+        
+        # Create config in parent directory
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+line_numbers = true
+""")
+        
+        with open("nested/deep/test_dir/file.txt", "w") as f:
+            f.write("Test content")
+        
+        # Change to nested directory
+        os.chdir("nested/deep")
+        
+        # Config should still be found
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert "1  Test content" in result.output
+
+
+def test_user_config(tmpdir, monkeypatch):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file.txt", "w") as f:
+            f.write("Test file")
+        
+        # Create a fake home directory
+        fake_home = tmpdir.mkdir("home")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        
+        # Create user config
+        config_dir = fake_home.mkdir(".config").mkdir("files-to-prompt")
+        with open(config_dir / "config.toml", "w") as f:
+            f.write("""
+[defaults]
+markdown = true
+""")
+        
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert "```" in result.output  # Markdown from user config
+
+
+def test_invalid_config_file(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file.txt", "w") as f:
+            f.write("Test file")
+        
+        # Create invalid TOML
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("invalid toml {{{")
+        
+        # Should show warning but continue
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert "Warning: Failed to load config" in result.output
+        assert "test_dir/file.txt" in result.output
+
+
+def test_config_with_output_option(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/file.txt", "w") as f:
+            f.write("Test file")
+        
+        # Create config with output option
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+output = "output.txt"
+""")
+        
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert not result.output  # No stdout
+        
+        # Check output file
+        with open("output.txt", "r") as f:
+            content = f.read()
+        assert "test_dir/file.txt" in content
+        assert "Test file" in content
+
+
+def test_config_boolean_flags(tmpdir):
+    runner = CliRunner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/.hidden.txt", "w") as f:
+            f.write("Hidden file")
+        with open("test_dir/normal.txt", "w") as f:
+            f.write("Normal file")
+        
+        # Create config with boolean flags
+        with open(".files-to-prompt.toml", "w") as f:
+            f.write("""
+[defaults]
+include_hidden = true
+cxml = true
+""")
+        
+        result = runner.invoke(cli, ["test_dir"])
+        assert result.exit_code == 0
+        assert "test_dir/.hidden.txt" in result.output
+        assert "<documents>" in result.output  # XML format
